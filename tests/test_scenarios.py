@@ -9,11 +9,33 @@ class BusTests(unittest.TestCase):
     def setUp(self):
         self.bus = GrasshopperBus("Кузя")
 
+    def checked_status(self):
+        """Полный снимок и точные типы публичного состояния по SPEC §3.3."""
+        expected_types = {
+            "name": str, "energy": int, "passengers": int,
+            "doors_open": bool, "springs_charged": bool,
+            "position_m": int, "mileage_m": int, "max_jump_m": int,
+        }
+        status = self.bus.get_status()
+        self.assertIsInstance(status, dict)
+        self.assertEqual(set(status), set(expected_types))
+        for key, expected_type in expected_types.items():
+            self.assertIs(type(status[key]), expected_type, key)
+            self.assertIs(type(getattr(self.bus, key)), expected_type, key)
+            self.assertEqual(getattr(self.bus, key), status[key], key)
+        return dict(status)
+
+    def tearDown(self):
+        self.checked_status()
+
     def reject(self, error, method, *args):
-        before = self.bus.get_status()
+        before = self.checked_status()
         with self.assertRaises(error):
             method(*args)
-        self.assertEqual(self.bus.get_status(), before)
+        after = self.checked_status()
+        self.assertEqual(after, before)
+        for key in before:
+            self.assertIs(type(after[key]), type(before[key]), key)
 
     def test_TC_021_route(self):
         """TC-021. Маршрут: посадка 4, езда 10, зарядка, прыжок 6, езда -5, высадка 4. Итог position=11,mileage=21,energy=87."""
@@ -76,3 +98,4 @@ class BusTests(unittest.TestCase):
         pilot.drive(5)
         pilot.drive(-5)
         self.assertEqual((self.bus.position_m,self.bus.mileage_m,self.bus.energy,self.bus.passengers),(0,10,88,2))
+

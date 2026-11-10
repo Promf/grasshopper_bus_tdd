@@ -9,11 +9,33 @@ class BusTests(unittest.TestCase):
     def setUp(self):
         self.bus = GrasshopperBus("Кузя")
 
+    def checked_status(self):
+        """Полный снимок и точные типы публичного состояния по SPEC §3.3."""
+        expected_types = {
+            "name": str, "energy": int, "passengers": int,
+            "doors_open": bool, "springs_charged": bool,
+            "position_m": int, "mileage_m": int, "max_jump_m": int,
+        }
+        status = self.bus.get_status()
+        self.assertIsInstance(status, dict)
+        self.assertEqual(set(status), set(expected_types))
+        for key, expected_type in expected_types.items():
+            self.assertIs(type(status[key]), expected_type, key)
+            self.assertIs(type(getattr(self.bus, key)), expected_type, key)
+            self.assertEqual(getattr(self.bus, key), status[key], key)
+        return dict(status)
+
+    def tearDown(self):
+        self.checked_status()
+
     def reject(self, error, method, *args):
-        before = self.bus.get_status()
+        before = self.checked_status()
         with self.assertRaises(error):
             method(*args)
-        self.assertEqual(self.bus.get_status(), before)
+        after = self.checked_status()
+        self.assertEqual(after, before)
+        for key in before:
+            self.assertIs(type(after[key]), type(before[key]), key)
 
     def test_TC_001_initial(self):
         """TC-001. Новый GrasshopperBus("Кузя"): полный начальный снимок."""
@@ -235,17 +257,31 @@ class BusTests(unittest.TestCase):
         self.reject(DoorsOpenError,self.bus.jump,1)
 
     def test_TC_016_loaded_jump(self):
-        """TC-016. Восемь пассажиров: 5 м запрещены, 4 разрешены; заряд сохраняется при отказе."""
-        # Arrange: исходный автобус из setUp.
-        # Подслучаи ниже: подготовка → вызов → проверка.
-        self.bus.charge_springs()
-        self.bus.open_doors()
-        self.bus.board(8)
-        self.bus.close_doors()
-        self.reject(JumpTooFarError,self.bus.jump,5)
-        self.assertTrue(self.bus.springs_charged)
-        self.bus.jump(4)
-        self.assertEqual((self.bus.position_m,self.bus.energy),(4,90))
+        """TC-016. Полный автобус: ±5 запрещены, ±4 разрешены; отказ атомарен."""
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                # Arrange: отдельный объект для каждого направления.
+                self.bus = GrasshopperBus("Кузя")
+                self.bus.charge_springs()
+                self.bus.open_doors()
+                self.bus.board(8)
+                self.bus.close_doors()
+                expected = {
+                    "name": "Кузя", "energy": 90, "passengers": 8,
+                    "doors_open": False, "springs_charged": True,
+                    "position_m": 0, "mileage_m": 0, "max_jump_m": 4,
+                }
+                self.assertEqual(self.checked_status(), expected)
+                # Act / Assert: превышение предела сохраняет весь снимок.
+                self.reject(JumpTooFarError, self.bus.jump, direction * 5)
+                # Act: точная граница допустима с прежним зарядом.
+                result = self.bus.jump(direction * 4)
+                # Assert: полный результат и состояние.
+                self.assertIs(type(result), int)
+                self.assertEqual(result, 4)
+                expected.update(position_m=direction * 4, mileage_m=4,
+                                springs_charged=False)
+                self.assertEqual(self.checked_status(), expected)
 
     def test_TC_017_zero_energy_jump(self):
         """TC-017. Предварительно оплаченный прыжок разрешён при нулевой энергии."""
@@ -278,6 +314,16 @@ class BusTests(unittest.TestCase):
         self.bus.recharge(1)
         self.assertEqual(self.bus.get_status(),before)
 
+        # Arrange: ненулевой запас; сумма остаётся ниже ограничения 100.
+        self.bus = GrasshopperBus("Кузя", energy=20)
+        expected = self.checked_status()
+        expected["energy"] = 25
+        # Act
+        result = self.bus.recharge(5)
+        # Assert: amount прибавляется, остальные поля сохраняются.
+        self.assertIsNone(result)
+        self.assertEqual(self.checked_status(), expected)
+
     def test_TC_019_all_errors(self):
         """TC-019. Каждое доменное исключение наследует BusError."""
         # Arrange: исходный автобус из setUp.
@@ -297,3 +343,4 @@ class BusTests(unittest.TestCase):
         self.reject(SpringsStateError,self.bus.jump,5)
         self.bus.charge_springs()
         self.reject(JumpTooFarError,self.bus.jump,5)
+
