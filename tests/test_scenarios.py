@@ -1,101 +1,187 @@
-"""Контрактные тесты автора Агапова А. М. Реализацию выполняет D."""
-import unittest
-from grasshopper_bus import (GrasshopperBus, BusError, DoorsOpenError,
-    DoorsClosedError, CapacityError, NoEnergyError, SpringsStateError,
-    JumpTooFarError)
+"""Сценарии поездок из §4.2 ТЗ."""
+
+from grasshopper_bus import (
+    DoorsOpenError, GrasshopperBus, JumpTooFarError, NoEnergyError, SpringsStateError,
+)
+from tests.bus_state import BusTestCase, attempt, typed_values
 from tests.pilot import Pilot
 
-class BusTests(unittest.TestCase):
-    def setUp(self):
-        self.bus = GrasshopperBus("Кузя")
 
-    def checked_status(self):
-        """Полный снимок и точные типы публичного состояния по SPEC §3.3."""
-        expected_types = {
-            "name": str, "energy": int, "passengers": int,
-            "doors_open": bool, "springs_charged": bool,
-            "position_m": int, "mileage_m": int, "max_jump_m": int,
-        }
-        status = self.bus.get_status()
-        self.assertIsInstance(status, dict)
-        self.assertEqual(set(status), set(expected_types))
-        for key, expected_type in expected_types.items():
-            self.assertIs(type(status[key]), expected_type, key)
-            self.assertIs(type(getattr(self.bus, key)), expected_type, key)
-            self.assertEqual(getattr(self.bus, key), status[key], key)
-        return dict(status)
-
-    def tearDown(self):
-        self.checked_status()
-
-    def reject(self, error, method, *args):
-        before = self.checked_status()
-        with self.assertRaises(error):
-            method(*args)
-        after = self.checked_status()
-        self.assertEqual(after, before)
-        for key in before:
-            self.assertIs(type(after[key]), type(before[key]), key)
-
-    def test_TC_021_route(self):
-        """TC-021. Маршрут: посадка 4, езда 10, зарядка, прыжок 6, езда -5, высадка 4. Итог position=11,mileage=21,energy=87."""
-        pilot=Pilot(self.bus)
-        # Given: пустой автобус с полным зарядом.
+class RouteTests(BusTestCase):
+    def test_TC_021_trip_over_a_ditch(self):
+        """TC-021. Автобус перепрыгивает яму и высаживает четырёх пассажиров на обратном пути."""
+        # Given
+        bus = GrasshopperBus("Кузя")
+        pilot = Pilot(bus)
+        # When
         pilot.pick_up(4)
-        # When: доехать до ямы и перепрыгнуть её.
         pilot.drive(10)
         pilot.prepare_jump()
-        self.assertEqual(self.bus.energy,88)
+        # Then
+        self.assertEqual((bus.energy, bus.max_jump_m), (88, 6))
+        self.assertTrue(bus.springs_charged)
+        # When
         pilot.jump(6)
-        # Then: после приземления можно ехать и высаживать людей.
         pilot.drive(-5)
         pilot.drop_off(4)
-        self.assertEqual((self.bus.position_m,self.bus.mileage_m,self.bus.energy,self.bus.passengers),(11,21,87,0))
+        # Then
+        self.assertBusState(bus, {
+            "name": "Кузя", "energy": 87, "passengers": 0, "doors_open": False,
+            "springs_charged": False, "position_m": 11, "mileage_m": 21, "max_jump_m": 8,
+        })
 
-    def test_TC_022_heavy_bus(self):
-        """TC-022. Восемь пассажиров; прыжок 6 отвергнут; высадка 4; тот же заряд позволяет 6 м. Итог energy=90,passengers=4."""
-        pilot=Pilot(self.bus)
-        # Given: полный автобус, пружины заряжены.
+    def test_TC_022_unload_and_retry_jump(self):
+        """TC-022. После отказа пилот высаживает четверых и повторяет прыжок без подзарядки."""
+        # Given
+        bus = GrasshopperBus("Кузя")
+        pilot = Pilot(bus)
         pilot.pick_up(8)
         pilot.prepare_jump()
-        # When: дальность слишком велика.
-        self.reject(JumpTooFarError,pilot.jump,6)
-        # Then: высадка части пассажиров позволяет использовать прежний заряд.
+        # When
+        result = attempt(bus, pilot.jump, 6)
+        # Then
+        self.assertRejected(JumpTooFarError, result)
+        self.assertEqual((bus.energy, bus.max_jump_m), (90, 4))
+        self.assertTrue(bus.springs_charged)
+        # When
         pilot.drop_off(4)
-        self.assertTrue(self.bus.springs_charged)
-        pilot.jump(6)
-        self.assertEqual((self.bus.position_m,self.bus.mileage_m,self.bus.energy,self.bus.passengers),(6,6,90,4))
+        distance = pilot.jump(6)
+        # Then
+        self.assertIs(type(distance), int)
+        self.assertEqual(distance, 6)
+        self.assertBusState(bus, {
+            "name": "Кузя", "energy": 90, "passengers": 4, "doors_open": False,
+            "springs_charged": False, "position_m": 6, "mileage_m": 6, "max_jump_m": 6,
+        })
 
     def test_TC_023_last_charge(self):
-        """TC-023. energy=12; езда 6, зарядка до нуля, прыжок 8; езда запрещена; пополнение 5, езда -5. Итог position=9,mileage=19,energy=4."""
-        self.bus=GrasshopperBus("К",12)
-        pilot=Pilot(self.bus)
-        # Given: малый запас энергии.
+        """TC-023. Автобус прыгает при нулевой энергии и продолжает поездку после подзарядки."""
+        # Given
+        bus = GrasshopperBus("Кузя", 12)
+        pilot = Pilot(bus)
+        # When
         pilot.drive(6)
         pilot.prepare_jump()
-        self.assertEqual(self.bus.energy,0)
-        # When: запасённая энергия пружин обеспечивает прыжок.
-        pilot.jump(8)
-        self.reject(NoEnergyError,pilot.drive,1)
-        # Then: после пополнения можно двигаться на колёсах.
+        # Then
+        self.assertEqual(bus.energy, 0)
+        self.assertTrue(bus.springs_charged)
+        # When
+        distance = pilot.jump(8)
+        # Then
+        self.assertIs(type(distance), int)
+        self.assertEqual((distance, bus.position_m, bus.mileage_m, bus.energy), (8, 14, 14, 0))
+        self.assertFalse(bus.springs_charged)
+        # When
+        result = attempt(bus, pilot.drive, 1)
+        # Then
+        self.assertRejected(NoEnergyError, result)
+        # When
         pilot.recharge(5)
         pilot.drive(-5)
-        self.assertEqual((self.bus.position_m,self.bus.mileage_m,self.bus.energy),(9,19,4))
+        # Then
+        self.assertBusState(bus, {
+            "name": "Кузя", "energy": 4, "passengers": 0, "doors_open": False,
+            "springs_charged": False, "position_m": 9, "mileage_m": 19, "max_jump_m": 8,
+        })
 
-    def test_TC_024_cancelled_jump(self):
-        """TC-024. Открытые двери блокируют езду; заряд пружин блокирует езду; сброс и возврат. Итог position=0,mileage=10,energy=88."""
-        pilot=Pilot(self.bus)
-        # Given: двери открыты, пассажиры ещё садятся.
-        self.bus.open_doors()
-        self.reject(DoorsOpenError,pilot.drive,5)
-        self.bus.board(2)
-        self.bus.close_doors()
-        # When: план прыжка отменён после зарядки.
+    def test_TC_024_cancel_jump_then_drive(self):
+        """TC-024. Пилот закрывает двери после посадки и отменяет прыжок для езды."""
+        # Given
+        bus = GrasshopperBus("Кузя")
+        pilot = Pilot(bus)
+        pilot.open_doors()
+        # When
+        result = attempt(bus, pilot.drive, 5)
+        # Then
+        self.assertRejected(DoorsOpenError, result)
+        # When
+        pilot.finish_boarding(2)
         pilot.prepare_jump()
-        self.reject(SpringsStateError,pilot.drive,5)
+        result = attempt(bus, pilot.drive, 5)
+        # Then
+        self.assertRejected(SpringsStateError, result)
+        self.assertTrue(bus.springs_charged)
+        self.assertEqual(bus.energy, 90)
+        # When
         pilot.cancel_jump()
-        # Then: езда снова доступна, энергия зарядки не возвращается.
         pilot.drive(5)
         pilot.drive(-5)
-        self.assertEqual((self.bus.position_m,self.bus.mileage_m,self.bus.energy,self.bus.passengers),(0,10,88,2))
+        # Then
+        self.assertBusState(bus, {
+            "name": "Кузя", "energy": 88, "passengers": 2, "doors_open": False,
+            "springs_charged": False, "position_m": 0, "mileage_m": 10, "max_jump_m": 7,
+        })
 
+    def test_TC_033_trip_leaves_reserve_bus_at_depot(self):
+        """TC-033. Резервный автобус остаётся на стоянке, пока второй выполняет рейс."""
+        # Given
+        bus = GrasshopperBus("Рейсовый")
+        reserve = GrasshopperBus("Резервный", 35)
+        pilot = Pilot(bus)
+        departure = bus.get_status()
+        # When
+        pilot.pick_up(2)
+        pilot.drive(5)
+        pilot.prepare_jump()
+        pilot.jump(7)
+        # Then
+        self.assertBusState(bus, {
+            "name": "Рейсовый", "energy": 89, "passengers": 2, "doors_open": False,
+            "springs_charged": False, "position_m": 12, "mileage_m": 12, "max_jump_m": 7,
+        })
+        initial = {
+            "name": "Рейсовый", "energy": 100, "passengers": 0, "doors_open": False,
+            "springs_charged": False, "position_m": 0, "mileage_m": 0, "max_jump_m": 8,
+        }
+        self.assertEqual(typed_values(departure), typed_values(initial))
+        self.assertBusState(reserve, {**initial, "name": "Резервный", "energy": 35})
+
+    def test_TC_034_shorten_jump_without_unloading(self):
+        """TC-034. С полной загрузкой после отказа пилот укорачивает прыжок до четырёх метров."""
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                # Given
+                bus = GrasshopperBus("Кузя")
+                pilot = Pilot(bus)
+                pilot.pick_up(8)
+                pilot.prepare_jump()
+                # When
+                result = attempt(bus, pilot.jump, direction * 5)
+                # Then
+                self.assertRejected(JumpTooFarError, result)
+                self.assertEqual((bus.energy, bus.max_jump_m), (90, 4))
+                self.assertTrue(bus.springs_charged)
+                # When
+                distance = pilot.jump(direction * 4)
+                # Then
+                self.assertIs(type(distance), int)
+                self.assertEqual(distance, 4)
+                self.assertBusState(bus, {
+                    "name": "Кузя", "energy": 90, "passengers": 8, "doors_open": False,
+                    "springs_charged": False, "position_m": direction * 4,
+                    "mileage_m": 4, "max_jump_m": 4,
+                })
+
+    def test_TC_035_top_up_before_preparing_jump(self):
+        """TC-035. Одной дополнительной единицы энергии хватает, чтобы зарядить пружины и прыгнуть."""
+        # Given
+        bus = GrasshopperBus("Кузя", 10)
+        pilot = Pilot(bus)
+        # When
+        pilot.drive(5)
+        result = attempt(bus, pilot.prepare_jump)
+        # Then
+        self.assertRejected(NoEnergyError, result)
+        self.assertEqual(bus.energy, 9)
+        self.assertFalse(bus.springs_charged)
+        # When
+        pilot.recharge(1)
+        pilot.prepare_jump()
+        distance = pilot.jump(-8)
+        # Then
+        self.assertIs(type(distance), int)
+        self.assertEqual(distance, 8)
+        self.assertBusState(bus, {
+            "name": "Кузя", "energy": 0, "passengers": 0, "doors_open": False,
+            "springs_charged": False, "position_m": -3, "mileage_m": 13, "max_jump_m": 8,
+        })

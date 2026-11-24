@@ -1,15 +1,23 @@
-"""Пилот для GWT: только публичные команды, без правил транспорта."""
+"""Команды пилота для маршрутных сценариев."""
+
+
 class Pilot:
     def __init__(self, bus):
         self.bus = bus
 
-    def pick_up(self, count):
+    def open_doors(self):
         self.bus.open_doors()
+
+    def pick_up(self, count):
+        self.open_doors()
+        self.finish_boarding(count)
+
+    def finish_boarding(self, count):
         self.bus.board(count)
         self.bus.close_doors()
 
     def drop_off(self, count):
-        self.bus.open_doors()
+        self.open_doors()
         self.bus.alight(count)
         self.bus.close_doors()
 
